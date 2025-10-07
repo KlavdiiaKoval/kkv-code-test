@@ -11,7 +11,7 @@ A simple file-to-file messaging pipeline using Go's standard library. Reads line
 ### Flow Diagram
 ```mermaid
 flowchart LR
-  input["input.txt"] --> upload-service["upload-service"] --> queue["queue service"] --> writer["writer"] --> output["output.txt"]
+  upload-service["upload-service"] --> reader["reader"] --> queue["queue service"] --> writer["writer"] --> output["output.txt"]
 ```
 
 ## Quick Start
