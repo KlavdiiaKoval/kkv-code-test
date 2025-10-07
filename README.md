@@ -6,12 +6,12 @@ A simple file-to-file messaging pipeline using Go's standard library. Reads line
 ## Components
 
 - **queue-service**: In-memory FIFO queue with HTTP API
-- **reader-writer**: Client that reads from input file, sends to queue, receives from queue, and writes to output file
+- **upload-service**: HTTP service for uploading a text file and forwarding its lines to the queue
 
 ### Flow Diagram
 ```mermaid
 flowchart LR
-  input["input.txt"] --> reader["reader"] --> queue["queue service"] --> writer["writer"] --> output["output.txt"]
+  input["input.txt"] --> upload-service["upload-service"] --> queue["queue service"] --> writer["writer"] --> output["output.txt"]
 ```
 
 ## Quick Start
@@ -22,23 +22,26 @@ flowchart LR
 go run ./cmd/queue-service
 ```
 
-2. Run the reader-writer (in another terminal):
+2. Start the upload service and POST a file:
 ```bash
-echo "Hello World" > input.txt
-go run ./cmd/reader-writer
-cat output.txt  # Should show "Hello World"
+go run ./cmd/upload-service -addr :8081
+curl -F "file=@input.txt" http://localhost:8081/upload
 ```
 
 ### Using Docker
 1. Create input file:
 ```bash
-mkdir -p data
-echo "Hello World" > data/input.txt
+echo "Hello World" > input.txt
 ```
 
 2. Run with Docker Compose:
 ```bash
 docker compose up --build
+```
+
+3. Upload file:
+```bash
+curl -F "file=@input.txt" http://localhost:8081/upload
 ```
 
 3. Check output:
@@ -56,7 +59,8 @@ go test ./...
 ### queue-service flags:
 - `-addr` - Server address (default: `:8080`)
 
-### reader-writer flags:
+### upload-service flags:
+- `-addr` - Port of upload service (default: `:8081`)
 - `-in` - Input file path (default: `input.txt`)
 - `-out` - Output file path (default: `output.txt`)  
 - `-queue-url` - Queue service URL (default: `http://localhost:8080`)
@@ -67,7 +71,7 @@ go test ./...
 
 ### Architecture
 The system is designed as two separate processes communicating via HTTP:
-- **Separation of concerns**: Queue service handles message storage/retrieval, reader-writer handles file I/O
+- **Separation of concerns**: Queue service handles message storage/retrieval, upload-service handles file I/O
 - **Standard library only**: Uses Go's `net/http` for simplicity and minimal dependencies
 - **Stateless protocol**: HTTP REST API makes the system easy to understand and debug
 
@@ -79,6 +83,7 @@ The system is designed as two separate processes communicating via HTTP:
 - `POST /queues/{name}` - Enqueue message (body contains raw message bytes)
 - `DELETE /queues/{name}` - Dequeue message (returns 200 with body or 204 if empty)
 - `HEAD /queues/{name}` - Check queue length via `X-Queue-Len` header
+- `POST /upload` - Upload file and enqueue its lines
 
 ### Concurrency Model
 - **Producer-Consumer pattern**: Reader and writer run as separate goroutines

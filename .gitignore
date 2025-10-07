@@ -1,14 +1,13 @@
-queue-service
-reader-writer
 *.exe
 *.out
 *.o
 *.so
 *.dylib
 
-input.txt
 output.txt
 
 *.test
 *.prof
 coverage.out
+
+data/

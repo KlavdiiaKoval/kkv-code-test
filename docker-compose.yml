@@ -1,3 +1,7 @@
+networks:
+  default:
+    driver: bridge
+
 services:
   queue:
     build:
@@ -5,12 +9,16 @@ services:
       dockerfile: Dockerfile.queue
     ports:
       - "8080:8080"
-  reader_writer:
+    volumes:
+      - ./data:/data
+  upload-service:
     build:
       context: .
-      dockerfile: Dockerfile.reader-writer
+      dockerfile: Dockerfile.upload-service
+    ports:
+      - "8081:8081"
     depends_on:
       - queue
     volumes:
       - ./data:/data
-    command: ["/reader-writer","-in","/data/input.txt","-out","/data/output.txt","-queue-url","http://queue:8080","-queue","lines"]
+    command: ["-addr",":8081","-out","/data/output.txt","-queue-url","http://queue:8080","-queue","lines"]
