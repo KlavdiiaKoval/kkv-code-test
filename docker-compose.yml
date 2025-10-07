@@ -1,0 +1,16 @@
+services:
+  queue:
+    build:
+      context: .
+      dockerfile: Dockerfile.queue
+    ports:
+      - "8080:8080"
+  reader_writer:
+    build:
+      context: .
+      dockerfile: Dockerfile.reader-writer
+    depends_on:
+      - queue
+    volumes:
+      - ./data:/data
+    command: ["/reader-writer","-in","/data/input.txt","-out","/data/output.txt","-queue-url","http://queue:8080","-queue","lines"]
