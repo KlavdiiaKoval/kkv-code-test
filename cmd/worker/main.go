@@ -145,13 +145,14 @@ func runPipeline(ctx context.Context, client *rwclient.Client, cfg config) (prod
 // runWatchMode watches a directory for new regular files and, once a file size stabilizes,
 // copies it (once mode) through an isolated queue (queueName = baseQueue + "-" + sanitizedFilename)
 // into an output file with the same base name inside watchOutDir. Each file is processed only once.
+type fileState struct {
+	size       int64
+	stableCnt  int
+	processing bool
+	processed  bool
+}
+
 func runWatchMode(ctx context.Context, cfg config) error {
-	type fileState struct {
-		size       int64
-		stableCnt  int
-		processing bool
-		processed  bool
-	}
 	states := make(map[string]*fileState)
 	var mu sync.Mutex
 	wg := &sync.WaitGroup{}
@@ -159,83 +160,89 @@ func runWatchMode(ctx context.Context, cfg config) error {
 	ticker := time.NewTicker(cfg.watchInterval)
 	defer ticker.Stop()
 
-	processFile := func(path string) {
-		base := filepath.Base(path)
-		qName := cfg.queueName + "-" + sanitize(base)
-		outPath := filepath.Join(cfg.watchOutDir, base)
-		log.Printf("watch: processing file=%s queue=%s out=%s", path, qName, outPath)
-		client := rwclient.New(cfg.queueURL, qName)
-		// build a producerDone channel then reuse consumeOnce
-		producerDone := make(chan error, 1)
-		go func() { producerDone <- client.Produce(ctx, path) }()
-		if err := consumeOnce(ctx, client, outPath, producerDone); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("watch: error processing %s: %v", path, err)
-		} else {
-			log.Printf("watch: completed file=%s", path)
-		}
-		mu.Lock()
-		if st := states[path]; st != nil {
-			st.processed = true
-			st.processing = false
-		}
-		mu.Unlock()
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
 			wg.Wait()
 			return ctx.Err()
 		case <-ticker.C:
-			entries, err := os.ReadDir(cfg.watchDir)
-			if err != nil {
-				log.Printf("watch: read dir error: %v", err)
-				continue
-			}
-			for _, e := range entries {
-				if e.IsDir() {
-					continue
-				}
-				name := e.Name()
-				if strings.HasPrefix(name, ".") { // skip hidden / dotfiles
-					continue
-				}
-				full := filepath.Join(cfg.watchDir, name)
-				info, err := e.Info()
-				if err != nil {
-					continue
-				}
-				// track state
-				mu.Lock()
-				st := states[full]
-				if st == nil {
-					st = &fileState{size: info.Size()}
-					states[full] = st
-					mu.Unlock()
-					continue
-				}
-				if st.processed || st.processing { // already done or in-progress
-					mu.Unlock()
-					continue
-				}
-				if info.Size() == st.size {
-					st.stableCnt++
-				} else {
-					st.size = info.Size()
-					st.stableCnt = 0
-				}
-				if st.stableCnt >= 1 { // size stable across two scans
-					st.processing = true
-					wg.Add(1)
-					go func(p string) {
-						defer wg.Done()
-						processFile(p)
-					}(full)
-				}
-				mu.Unlock()
-			}
+			processWatchDir(ctx, cfg, states, &mu, wg)
 		}
 	}
+}
+
+func processWatchDir(ctx context.Context, cfg config, states map[string]*fileState, mu *sync.Mutex, wg *sync.WaitGroup) {
+	entries, err := os.ReadDir(cfg.watchDir)
+	if err != nil {
+		log.Printf("watch: read dir error: %v", err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, ".") { // skip hidden / dotfiles
+			continue
+		}
+		full := filepath.Join(cfg.watchDir, name)
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		handleFileState(ctx, cfg, full, info.Size(), states, mu, wg)
+	}
+}
+
+func handleFileState(ctx context.Context, cfg config, full string, size int64, states map[string]*fileState, mu *sync.Mutex, wg *sync.WaitGroup) {
+	mu.Lock()
+	st := states[full]
+	if st == nil {
+		st = &fileState{size: size}
+		states[full] = st
+		mu.Unlock()
+		return
+	}
+	if st.processed || st.processing { // already done or in-progress
+		mu.Unlock()
+		return
+	}
+	if size == st.size {
+		st.stableCnt++
+	} else {
+		st.size = size
+		st.stableCnt = 0
+	}
+	if st.stableCnt >= 1 { // size stable across two scans
+		st.processing = true
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			processFile(ctx, cfg, p, states, mu)
+		}(full)
+	}
+	mu.Unlock()
+}
+
+func processFile(ctx context.Context, cfg config, path string, states map[string]*fileState, mu *sync.Mutex) {
+	base := filepath.Base(path)
+	qName := cfg.queueName + "-" + sanitize(base)
+	outPath := filepath.Join(cfg.watchOutDir, base)
+	log.Printf("watch: processing file=%s queue=%s out=%s", path, qName, outPath)
+	client := rwclient.New(cfg.queueURL, qName)
+	producerDone := make(chan error, 1)
+	go func() { producerDone <- client.Produce(ctx, path) }()
+	if err := consumeOnce(ctx, client, outPath, producerDone); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("watch: error processing %s: %v", path, err)
+	} else {
+		log.Printf("watch: completed file=%s", path)
+	}
+	mu.Lock()
+	if st := states[path]; st != nil {
+		st.processed = true
+		st.processing = false
+	}
+	mu.Unlock()
 }
 
 // sanitize converts a filename into a queue-safe suffix.
