@@ -17,9 +17,7 @@ import (
 	"corti-kkv/internal/rwclient"
 )
 
-// Simple worker that reads an input file, enqueues each line, then drains the queue to an output file.
-// When mode=once (default) it exits after the queue is drained. If mode=stream it will keep consuming.
-// config holds runtime configuration parsed from flags.
+// Types
 type config struct {
 	queueURL      string
 	queueName     string
@@ -31,36 +29,46 @@ type config struct {
 	watchInterval time.Duration
 }
 
+type fileState struct {
+	size       int64
+	stableCnt  int
+	processing bool
+	processed  bool
+}
+
 func main() {
 	cfg := parseConfig()
-
 	ctx, cancel := signalContext(context.Background())
 	defer cancel()
 
 	if cfg.watchDir != "" {
-		if err := os.MkdirAll(cfg.watchOutDir, 0o755); err != nil {
-			log.Fatalf("create watch output dir: %v", err)
-		}
-		log.Printf("worker start (watch mode): dir=%s outDir=%s baseQueue=%s interval=%s", cfg.watchDir, cfg.watchOutDir, cfg.queueName, cfg.watchInterval)
-		if err := runWatchMode(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("watch mode error: %v", err)
-			os.Exit(1)
-		}
+		startWatchMode(ctx, cfg)
 		return
 	}
 
-	ensureOutputDir(cfg.outPath)
+	startSingleFileMode(ctx, cfg)
+}
 
-	// Optional: show input file size if it exists
+func startWatchMode(ctx context.Context, cfg config) {
+	if err := os.MkdirAll(cfg.watchOutDir, 0o755); err != nil {
+		log.Fatalf("create watch output dir: %v", err)
+	}
+	log.Printf("worker start (watch mode): dir=%s outDir=%s baseQueue=%s interval=%s", cfg.watchDir, cfg.watchOutDir, cfg.queueName, cfg.watchInterval)
+	if err := runWatchMode(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("watch mode error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func startSingleFileMode(ctx context.Context, cfg config) {
+	ensureOutputDir(cfg.outPath)
 	var inSize int64
 	if st, err := os.Stat(cfg.inPath); err == nil {
 		inSize = st.Size()
 	}
 	log.Printf("worker start: queueURL=%s queue=%s mode=%s in=%s(size=%d) out=%s", cfg.queueURL, cfg.queueName, cfg.mode, cfg.inPath, inSize, cfg.outPath)
-
 	client := rwclient.New(cfg.queueURL, cfg.queueName)
 	prodErr, consErr := runPipeline(ctx, client, cfg)
-
 	hasErr := false
 	if prodErr != nil && !errors.Is(prodErr, context.Canceled) {
 		hasErr = true
@@ -76,37 +84,23 @@ func main() {
 	log.Printf("worker finished successfully")
 }
 
-func parseConfig() config {
-	var cfg config
-	flag.StringVar(&cfg.queueURL, "queue-url", "http://localhost:8080", "queue service base URL")
-	flag.StringVar(&cfg.queueName, "queue", "lines", "queue name (base name in watch mode)")
-	flag.StringVar(&cfg.inPath, "in", "data/input.txt", "input file path (single-file modes)")
-	flag.StringVar(&cfg.outPath, "out", "data/output.txt", "output file path (single-file modes)")
-	flag.StringVar(&cfg.mode, "mode", "once", "single-file mode: once|stream (ignored when -watch-dir set)")
-	flag.StringVar(&cfg.watchDir, "watch-dir", "", "if set, watch this directory for new files (disables -in/-out/-mode pipeline)")
-	flag.StringVar(&cfg.watchOutDir, "watch-out", "data/out", "output directory for processed files when using -watch-dir")
-	flag.DurationVar(&cfg.watchInterval, "watch-interval", 500*time.Millisecond, "poll interval for directory watch mode")
-	flag.Parse()
-	return cfg
-}
+func runWatchMode(ctx context.Context, cfg config) error {
+	states := make(map[string]*fileState)
+	var mu sync.Mutex
+	wg := &sync.WaitGroup{}
 
-func ensureOutputDir(path string) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		log.Fatalf("create output dir: %v", err)
+	ticker := time.NewTicker(cfg.watchInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return ctx.Err()
+		case <-ticker.C:
+			processWatchDir(ctx, cfg, states, &mu, wg)
+		}
 	}
-}
-
-// signalContext returns a context cancelled on SIGINT or SIGTERM.
-func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(parent)
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		log.Println("signal received: shutting down")
-		cancel()
-	}()
-	return ctx, cancel
 }
 
 func runPipeline(ctx context.Context, client *rwclient.Client, cfg config) (prodErr, consErr error) {
@@ -142,78 +136,83 @@ func runPipeline(ctx context.Context, client *rwclient.Client, cfg config) (prod
 	return
 }
 
-// runWatchMode watches a directory for new regular files and, once a file size stabilizes,
-// copies it (once mode) through an isolated queue (queueName = baseQueue + "-" + sanitizedFilename)
-// into an output file with the same base name inside watchOutDir. Each file is processed only once.
-type fileState struct {
-	size       int64
-	stableCnt  int
-	processing bool
-	processed  bool
+func parseConfig() config {
+	var cfg config
+	flag.StringVar(&cfg.queueURL, "queue-url", "http://localhost:8080", "queue service base URL")
+	flag.StringVar(&cfg.queueName, "queue", "lines", "queue name (base name in watch mode)")
+	flag.StringVar(&cfg.inPath, "in", "data/input.txt", "input file path (single-file modes)")
+	flag.StringVar(&cfg.outPath, "out", "data/output.txt", "output file path (single-file modes)")
+	flag.StringVar(&cfg.mode, "mode", "once", "single-file mode: once|stream (ignored when -watch-dir set)")
+	flag.StringVar(&cfg.watchDir, "watch-dir", "", "if set, watch this directory for new files (disables -in/-out/-mode pipeline)")
+	flag.StringVar(&cfg.watchOutDir, "watch-out", "data/out", "output directory for processed files when using -watch-dir")
+	flag.DurationVar(&cfg.watchInterval, "watch-interval", 500*time.Millisecond, "poll interval for directory watch mode")
+	flag.Parse()
+	return cfg
 }
 
-func runWatchMode(ctx context.Context, cfg config) error {
-	states := make(map[string]*fileState)
-	var mu sync.Mutex
-	wg := &sync.WaitGroup{}
-
-	ticker := time.NewTicker(cfg.watchInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			wg.Wait()
-			return ctx.Err()
-		case <-ticker.C:
-			processWatchDir(ctx, cfg, states, &mu, wg)
-		}
+func ensureOutputDir(path string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Fatalf("create output dir: %v", err)
 	}
+}
+
+func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("signal received: shutting down")
+		cancel()
+	}()
+	return ctx, cancel
 }
 
 func processWatchDir(ctx context.Context, cfg config, states map[string]*fileState, mu *sync.Mutex, wg *sync.WaitGroup) {
-	entries, err := os.ReadDir(cfg.watchDir)
+	entries := readWatchDirEntries(cfg.watchDir)
+	for _, entry := range entries {
+		processWatchEntry(ctx, cfg, entry, states, mu, wg)
+	}
+}
+
+func readWatchDirEntries(dir string) []os.DirEntry {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		log.Printf("watch: read dir error: %v", err)
+		return nil
+	}
+	return entries
+}
+
+func processWatchEntry(ctx context.Context, cfg config, entry os.DirEntry, states map[string]*fileState, mu *sync.Mutex, wg *sync.WaitGroup) {
+	if entry.IsDir() {
 		return
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if strings.HasPrefix(name, ".") { // skip hidden / dotfiles
-			continue
-		}
-		full := filepath.Join(cfg.watchDir, name)
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		handleFileState(ctx, cfg, full, info.Size(), states, mu, wg)
+	name := entry.Name()
+	if strings.HasPrefix(name, ".") {
+		return
 	}
+	full := filepath.Join(cfg.watchDir, name)
+	info, err := entry.Info()
+	if err != nil {
+		return
+	}
+	handleFileState(ctx, cfg, full, info.Size(), states, mu, wg)
 }
 
 func handleFileState(ctx context.Context, cfg config, full string, size int64, states map[string]*fileState, mu *sync.Mutex, wg *sync.WaitGroup) {
 	mu.Lock()
+	defer mu.Unlock()
 	st := states[full]
 	if st == nil {
-		st = &fileState{size: size}
-		states[full] = st
-		mu.Unlock()
+		states[full] = &fileState{size: size}
 		return
 	}
-	if st.processed || st.processing { // already done or in-progress
-		mu.Unlock()
+	if st.processed || st.processing {
 		return
 	}
-	if size == st.size {
-		st.stableCnt++
-	} else {
-		st.size = size
-		st.stableCnt = 0
-	}
-	if st.stableCnt >= 1 { // size stable across two scans
+	updateFileState(st, size)
+	if isFileStable(st) {
 		st.processing = true
 		wg.Add(1)
 		go func(p string) {
@@ -221,7 +220,19 @@ func handleFileState(ctx context.Context, cfg config, full string, size int64, s
 			processFile(ctx, cfg, p, states, mu)
 		}(full)
 	}
-	mu.Unlock()
+}
+
+func updateFileState(st *fileState, size int64) {
+	if size == st.size {
+		st.stableCnt++
+	} else {
+		st.size = size
+		st.stableCnt = 0
+	}
+}
+
+func isFileStable(st *fileState) bool {
+	return st.stableCnt >= 1
 }
 
 func processFile(ctx context.Context, cfg config, path string, states map[string]*fileState, mu *sync.Mutex) {
@@ -245,7 +256,6 @@ func processFile(ctx context.Context, cfg config, path string, states map[string
 	mu.Unlock()
 }
 
-// sanitize converts a filename into a queue-safe suffix.
 func sanitize(name string) string {
 	var b strings.Builder
 	for _, r := range name {
@@ -262,7 +272,6 @@ func sanitize(name string) string {
 	return s
 }
 
-// consumeOnce drains the queue to the output file then returns when the producer is finished and the queue is empty.
 func consumeOnce(ctx context.Context, c *rwclient.Client, outPath string, producerDone <-chan error) error {
 	f, err := os.Create(outPath)
 	if err != nil {
@@ -274,10 +283,8 @@ func consumeOnce(ctx context.Context, c *rwclient.Client, outPath string, produc
 	idle := 10 * time.Millisecond
 	producerFinished := false
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := checkContext(ctx); err != nil {
+			return err
 		}
 		b, err := c.Dequeue(ctx)
 		if err != nil {
@@ -291,26 +298,42 @@ func consumeOnce(ctx context.Context, c *rwclient.Client, outPath string, produc
 		}
 		// empty
 		if !producerFinished {
-			select {
-			case <-producerDone:
-				producerFinished = true
-			default:
-			}
+			producerFinished = waitForProducer(producerDone)
 		}
-		if producerFinished {
-			ln, err := c.QueueLength(ctx)
-			if err == nil && ln == 0 {
-				log.Printf("consumer: completed once mode")
-				return nil
-			}
+		if producerFinished && queueIsEmpty(ctx, c) {
+			log.Printf("consumer: completed once mode")
+			return nil
 		}
 		time.Sleep(idle)
 	}
 }
 
-// produceStream tails the input file: it starts from current size (creating if missing), then watches for appended data.
-// Each full line (ending with '\n') is enqueued immediately; a partial final line is held until newline is written or context ends.
-// It never returns unless context is canceled or a fatal error occurs.
+// checkContext returns ctx.Err() if context is done, otherwise nil
+func checkContext(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
+// waitForProducer returns true if the producer is finished
+func waitForProducer(producerDone <-chan error) bool {
+	select {
+	case <-producerDone:
+		return true
+	default:
+		return false
+	}
+}
+
+// queueIsEmpty returns true if the queue is empty, false otherwise
+func queueIsEmpty(ctx context.Context, c *rwclient.Client) bool {
+	ln, err := c.QueueLength(ctx)
+	return err == nil && ln == 0
+}
+
 func produceStream(ctx context.Context, c *rwclient.Client, path string) error {
 	const pollInterval = 300 * time.Millisecond
 	var offset int64
