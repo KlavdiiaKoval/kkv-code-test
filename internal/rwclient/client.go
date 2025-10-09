@@ -102,6 +102,9 @@ func (c *Client) enqueue(ctx context.Context, body []byte) error {
 	return nil
 }
 
+// Enqueue is an exported wrapper around enqueue for external producer usage.
+func (c *Client) Enqueue(ctx context.Context, body []byte) error { return c.enqueue(ctx, body) }
+
 func (c *Client) dequeue(ctx context.Context) ([]byte, error) {
 	url := fmt.Sprintf("%s/queues/%s", c.QueueURL, c.QueueName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
@@ -127,6 +130,9 @@ func (c *Client) dequeue(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("dequeue failed: %s: %s", resp.Status, string(b))
 	}
 }
+
+// Dequeue is an exported wrapper around dequeue for external consumer usage.
+func (c *Client) Dequeue(ctx context.Context) ([]byte, error) { return c.dequeue(ctx) }
 
 func (c *Client) QueueLength(ctx context.Context) (int, error) {
 	url := fmt.Sprintf("%s/queues/%s", c.QueueURL, c.QueueName)

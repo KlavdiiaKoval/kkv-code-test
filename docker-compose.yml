@@ -11,14 +11,12 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/data
-  upload-service:
+  worker:
     build:
       context: .
-      dockerfile: Dockerfile.upload-service
-    ports:
-      - "8081:8081"
+      dockerfile: Dockerfile.worker
     depends_on:
       - queue
     volumes:
       - ./data:/data
-    command: ["-addr",":8081","-out","/data/output.txt","-queue-url","http://queue:8080","-queue","lines"]
+    command: ["-queue-url","http://queue:8080","-queue","lines","-watch-dir","/data/in","-watch-out","/data/out"]
