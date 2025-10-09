@@ -43,8 +43,8 @@ func TestClientProduceConsume(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := queue.NewQueueManager()
-			s := api.NewServer(m)
+			q := queue.NewQueue()
+			s := api.NewServer(q)
 			ts := httptest.NewServer(s.Handler())
 			defer ts.Close()
 
@@ -438,8 +438,8 @@ func TestClientConsume(t *testing.T) {
 }
 
 func TestClientQueueLengthIntegration(t *testing.T) {
-	m := queue.NewQueueManager()
-	s := api.NewServer(m)
+	q := queue.NewQueue()
+	s := api.NewServer(q)
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 	client := New(ts.URL, "intq")

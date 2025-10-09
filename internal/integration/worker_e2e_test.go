@@ -15,8 +15,8 @@ import (
 
 // TestWorkerEndToEndOnceMode validates that producing then consuming recreates the original file content exactly.
 func TestWorkerEndToEndOnceMode(t *testing.T) {
-	m := queue.NewQueueManager()
-	srv := api.NewServer(m)
+	q := queue.NewQueue()
+	srv := api.NewServer(q)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

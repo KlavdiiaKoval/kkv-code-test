@@ -13,8 +13,8 @@ func main() {
 	addr := flag.String("addr", ":8080", "address to listen on")
 	flag.Parse()
 
-	manager := queue.NewQueueManager()
-	srv := api.NewServer(manager)
+	q := queue.NewQueue()
+	srv := api.NewServer(q)
 
 	server := &http.Server{
 		Addr:    *addr,

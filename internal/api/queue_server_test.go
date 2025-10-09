@@ -13,8 +13,8 @@ import (
 )
 
 func TestServer(t *testing.T) {
-	m := queue.NewQueueManager()
-	s := NewServer(m)
+	q := queue.NewQueue()
+	s := NewServer(q)
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 

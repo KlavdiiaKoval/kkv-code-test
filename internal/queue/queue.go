@@ -40,20 +40,3 @@ func (q *Queue) Len() int {
 	return len(q.items)
 }
 
-type QueueManager struct {
-	mu     sync.Mutex
-	queues map[string]*Queue
-}
-
-func NewQueueManager() *QueueManager { return &QueueManager{queues: make(map[string]*Queue)} }
-
-func (m *QueueManager) Get(name string) *Queue {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	q := m.queues[name]
-	if q == nil {
-		q = NewQueue()
-		m.queues[name] = q
-	}
-	return q
-}
