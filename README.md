@@ -31,7 +31,7 @@ File-to-file messaging pipeline using Go's standard library. Reads lines from a 
 
 ## Components
 
-- **queue-service**: In-memory FIFO queue with HTTP API (stdlib only). Endpoints:
+- **queue-service**: In-memory FIFO queue with HTTP API. Endpoints:
 	- `POST /queues/:name/messages` (enqueue, accepts `application/octet-stream` or JSON `{ "message": "..." }`)
 	- `DELETE /queues/:name/messages/head` (dequeue, returns message as `application/octet-stream`)
 - **worker**: Single process that acts as both reader (producer) and writer (consumer). Supports single-file, stream, and directory watch modes. Communicates with the queue-service using the above endpoints.
@@ -251,3 +251,30 @@ go tool cover -html=coverage.out -o coverage.html
 - Watch mode uses polling (not FS events)
 - Stream mode buffers a partial trailing line until newline appended
 - No back-pressure or max queue size enforcement
+
+
+## Scaling Strategy
+
+
+This solution was built for simplicity and local testing, but it can be scaled to handle higher throughput and improved reliability with a few key enhancements.
+
+### Queue Service
+
+- **Persistence:** Right now, the queue is in-memory, which means any restart results in lost messages. For production use, we'd need to back it with something persistent—like Redis, PostgreSQL, or a distributed message broker—to ensure data durability and allow for scaling across instances.
+
+- **Stateless Architecture:** To scale the queue service horizontally, it should be stateless. That way, multiple instances can run behind a load balancer, all connected to the same backend queue.
+
+- **Rate Limiting and Auth:** To avoid abuse or system overload, it’s important to add API rate limiting and authentication in front of the queue endpoints.
+
+### Worker Scaling
+
+- **Parallel Processing:** You can spin up multiple worker instances to consume and process messages in parallel, which helps increase throughput. Just make sure file writes are idempotent so you don’t end up with duplicate results.
+
+- **Partitioning:** For larger datasets or high-volume use cases, consider partitioning input data or splitting up queues so different workers can handle different subsets. This helps distribute the workload more efficiently.
+
+### Deployment and Operations
+
+- **Container Orchestration:** e.g Kubernetes 
+- **Monitoring and Alerting:** It's essential to track system health. Tools like Prometheus and Grafana can monitor queue depth, worker status, and processing times. Set up alerts so issues like failures or growing backlogs don’t go unnoticed.
+
+- **Back-pressure:** To avoid memory issues or system crashes under heavy load, implement back-pressure mechanisms or enforce queue size limits to keep things running smoothly.
