@@ -22,7 +22,6 @@ type config struct {
 	queueName     string
 	inPath        string
 	outPath       string
-	mode          string
 	watchDir      string
 	watchOutDir   string
 	watchInterval time.Duration
@@ -33,12 +32,12 @@ func main() {
 	ctx, cancel := signalContext(context.Background())
 	defer cancel()
 
-	if cfg.watchDir != "" {
-		startWatchMode(ctx, cfg)
-		return
+	if cfg.watchDir == "" {
+		if err := os.MkdirAll(cfg.watchOutDir, dirPerm); err != nil {
+			log.Fatalf("create watch output dir: %v", err)
+		}
 	}
-
-	startSingleFileMode(ctx, cfg)
+	startWatchMode(ctx, cfg)
 }
 
 func parseConfig() config {
@@ -47,7 +46,6 @@ func parseConfig() config {
 	flag.StringVar(&cfg.queueName, "queue", "lines", "queue name (base name in watch mode)")
 	flag.StringVar(&cfg.inPath, "in", "data/input.txt", "input file path (single-file modes)")
 	flag.StringVar(&cfg.outPath, "out", "data/output.txt", "output file path (single-file modes)")
-	flag.StringVar(&cfg.mode, "mode", "once", "single-file mode: once|stream (ignored when -watch-dir set)")
 	flag.StringVar(&cfg.watchDir, "watch-dir", "", "if set, watch this directory for new files (disables -in/-out/-mode pipeline)")
 	flag.StringVar(&cfg.watchOutDir, "watch-out", "data/out", "output directory for processed files when using -watch-dir")
 	flag.DurationVar(&cfg.watchInterval, "watch-interval", 500*time.Millisecond, "poll interval for directory watch mode")

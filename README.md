@@ -27,14 +27,14 @@ Implement it as 2 asynchronous workers exchanging information by using a service
 
 # Solution Overview
 
-File-to-file messaging pipeline using Go's standard library. Reads lines from a file (or directory in watch mode), sends them through an HTTP queue service, and writes them to output files, verifying content reproduction. Only two processes are used: one for the queue service and one for the worker (reader/writer).
+File-to-file messaging pipeline using Go's standard library. Reads lines from a file (or directory), sends them through an HTTP queue service, and writes them to output files, verifying content reproduction. Only two processes are used: one for the queue service and one for the worker (reader/writer).
 
 ## Components
 
 - **queue-service**: In-memory FIFO queue with HTTP API. Endpoints:
 	- `POST /queues/:name/messages` (enqueue, accepts `application/octet-stream` or JSON `{ "message": "..." }`)
 	- `DELETE /queues/:name/messages/head` (dequeue, returns message as `application/octet-stream`)
-- **worker**: Single process that acts as both reader (producer) and writer (consumer). Supports single-file, stream, and directory watch modes. Communicates with the queue-service using the above endpoints.
+- **worker**: Single process that acts as both reader (producer) and writer (consumer). Supports single-file and directory watch. Communicates with the queue-service using the above endpoints.
 
 ---
 
@@ -144,22 +144,17 @@ go run ./cmd/queue-service
 
 ### 2. Start the worker (terminal 2):
 
-#### Directory watch mode:
+
+#### Directory watch (default):
 ```bash
 mkdir -p data/in data/out
 go run ./cmd/worker -watch-dir data/in -watch-out data/out -queue lines
 ```
 Drop files into `data/in/` and outputs will appear in `data/out/` with the same filenames.
 
-#### Single-file once mode:
+#### Single-file mode (default if -watch-dir not set):
 ```bash
-go run ./cmd/worker -mode once -in data/input.txt -out data/output.txt -queue lines
-```
-
-#### Stream (tail) mode:
-```bash
-go run ./cmd/worker -mode stream -in data/in/input.txt -out data/out/output.txt -queue lines
-echo "another line" >> data/in/input.txt
+go run ./cmd/worker -in data/input.txt -out data/output.txt -queue lines
 ```
 
 - Make sure the queue service is running before starting the worker.
@@ -209,8 +204,7 @@ go tool cover -html=coverage.out -o coverage.html
 - `-queue` - Queue name (default: `lines`)
 - `-in` - Input file path (default: `data/input.txt`)
 - `-out` - Output file path (default: `data/output.txt`)
-- `-mode` - `once` (default) or `stream` (tail mode)
-- `-watch-dir` - Directory to watch for new files (disables `-in/-out/-mode`)
+- `-watch-dir` - Directory to watch for new files (disables `-in/-out`)
 - `-watch-out` - Output directory for processed files (default: `data/out`)
 - `-watch-interval` - Poll interval (default: 500ms)
 
@@ -249,7 +243,6 @@ go tool cover -html=coverage.out -o coverage.html
 - Single in-memory queue service (messages lost on restart)
 - No batching, retries, limits, or metrics
 - Watch mode uses polling (not FS events)
-- Stream mode buffers a partial trailing line until newline appended
 - No back-pressure or max queue size enforcement
 
 

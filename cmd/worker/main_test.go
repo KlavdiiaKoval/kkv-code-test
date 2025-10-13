@@ -25,24 +25,6 @@ func TestSanitize(t *testing.T) {
 	}
 }
 
-func TestGetOutputDir(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		out  string
-	}{
-		{"with dir", "/foo/bar/baz.txt", "/foo/bar"},
-		{"no dir", "file.txt", "."},
-		{"trailing slash", "/foo/bar/", "/foo/bar"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := getOutputDir(c.in)
-			assert.Equal(t, c.out, got)
-		})
-	}
-}
-
 func TestStringStartsWithDot(t *testing.T) {
 	cases := []struct {
 		in  string
