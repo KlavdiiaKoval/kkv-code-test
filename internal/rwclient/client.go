@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 )
 
@@ -84,7 +83,7 @@ func (c *Client) Consume(ctx context.Context, outputPath string) error {
 }
 
 func (c *Client) enqueue(ctx context.Context, body []byte) error {
-	url := fmt.Sprintf("%s/queues/%s", c.QueueURL, c.QueueName)
+	url := fmt.Sprintf("%s/queues/%s/messages", c.QueueURL, c.QueueName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -103,7 +102,7 @@ func (c *Client) enqueue(ctx context.Context, body []byte) error {
 }
 
 func (c *Client) dequeue(ctx context.Context) ([]byte, error) {
-	url := fmt.Sprintf("%s/queues/%s", c.QueueURL, c.QueueName)
+	url := fmt.Sprintf("%s/queues/%s/messages/head", c.QueueURL, c.QueueName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return nil, err
@@ -126,30 +125,5 @@ func (c *Client) dequeue(ctx context.Context) ([]byte, error) {
 		b, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("dequeue failed: %s: %s", resp.Status, string(b))
 	}
-}
 
-func (c *Client) QueueLength(ctx context.Context) (int, error) {
-	url := fmt.Sprintf("%s/queues/%s", c.QueueURL, c.QueueName)
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
-	if err != nil {
-		return 0, err
-	}
-	resp, err := c.HttpClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("queue length failed: %s: %s", resp.Status, string(b))
-	}
-	h := resp.Header.Get("X-Queue-Len")
-	if h == "" {
-		return 0, fmt.Errorf("missing X-Queue-Len header")
-	}
-	n, err := strconv.Atoi(h)
-	if err != nil {
-		return 0, fmt.Errorf("invalid X-Queue-Len header: %w", err)
-	}
-	return n, nil
 }

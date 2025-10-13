@@ -13,7 +13,7 @@ YELLOW=\033[33m
 CYAN=\033[36m
 RESET=\033[0m
 
-.PHONY: help deps tidy build test test-cover cover cover-html race lint clean docker-build-reader-writer docker-build-queue compose-up compose-down
+.PHONY: help deps tidy build test test-cover cover cover-html race lint clean docker-build-queue docker-build-worker compose-up compose-down
 
 help: ## Show this help
 	@echo "Available targets:" && \
@@ -65,11 +65,11 @@ clean: ## Remove build artifacts and coverage files
 
 # Docker / Compose helpers
 
-docker-build-reader-writer: ## Build reader-writer image
-	docker build -f Dockerfile.reader-writer -t $(APP_NAME)-reader-writer:latest .
-
 docker-build-queue: ## Build queue image
 	docker build -f Dockerfile.queue -t $(APP_NAME)-queue:latest .
+
+docker-build-worker: ## Build worker image
+	docker build -f Dockerfile.worker -t $(APP_NAME)-worker:latest .
 
 compose-up: ## Start services via docker-compose
 	docker compose up --build -d

@@ -34,26 +34,13 @@ func (q *Queue) Dequeue() []byte {
 	return item
 }
 
+// item := q.items[0] gets the first element.
+// If there’s only one item, q.items = q.items[:0] resets the slice to empty (efficient, no allocation).
+// Otherwise, q.items = q.items[1:] drops the first element by slicing (also efficient,
+// but the underlying array still holds the old reference until all elements are removed or the slice is reallocated).
+
 func (q *Queue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.items)
-}
-
-type QueueManager struct {
-	mu     sync.Mutex
-	queues map[string]*Queue
-}
-
-func NewQueueManager() *QueueManager { return &QueueManager{queues: make(map[string]*Queue)} }
-
-func (m *QueueManager) Get(name string) *Queue {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	q := m.queues[name]
-	if q == nil {
-		q = NewQueue()
-		m.queues[name] = q
-	}
-	return q
 }

@@ -1,0 +1,72 @@
+openapi: 3.1.0
+info:
+  title: Queue Service API
+  version: 1.0.0
+  description: API for enqueuing and dequeuing messages in named queues.
+paths:
+  /queues/{name}/messages:
+    post:
+      summary: Enqueue a message
+      description: Add a new message to the specified queue.
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+          description: Name of the queue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+              required:
+                - message
+      responses:
+        '200':
+          description: Message enqueued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  id:
+                    type: string
+        '400':
+          description: Invalid request
+        '500':
+          description: Server error
+
+  /queues/{name}/messages/head:
+    delete:
+      summary: Dequeue the head message
+      description: Remove and return the head message from the specified queue.
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+          description: Name of the queue
+      responses:
+        '200':
+          description: Message dequeued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  id:
+                    type: string
+        '404':
+          description: Queue is empty or not found
+        '500':
+          description: Server error

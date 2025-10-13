@@ -2,8 +2,7 @@ package rwclient
 
 import (
 	"context"
-	api "corti-kkv/internal/api"
-	"corti-kkv/internal/queue"
+	queueapi "corti-kkv/internal/queueapi"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +16,43 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
+
+// newHTTPTestClient creates a Client with a custom URL and optional transport error for testing.
+func newHTTPTestClient(url string, transportErr error) *Client {
+	httpClient := &http.Client{}
+	if transportErr != nil {
+		httpClient.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, transportErr
+		})
+	}
+	return &Client{
+		QueueURL:   url,
+		QueueName:  "q",
+		HttpClient: httpClient,
+	}
+}
+
+// roundTripperFunc allows mocking http.RoundTripper for http.Client.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// waitForFileContent waits until the file at path contains the expected content or times out.
+func waitForFileContent(t *testing.T, path string, want []byte, timeout, poll time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for {
+		b, err := os.ReadFile(path)
+		if err == nil && string(b) == string(want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for file %s to have expected content", path)
+		}
+		time.Sleep(poll)
+	}
+}
 
 func TestClientProduceConsume(t *testing.T) {
 	cases := []struct {
@@ -43,9 +79,7 @@ func TestClientProduceConsume(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := queue.NewQueueManager()
-			s := api.NewServer(m)
-			ts := httptest.NewServer(s.Handler())
+			ts := httptest.NewServer(queueapi.RegisterRoutes(context.Background()))
 			defer ts.Close()
 
 			dir := t.TempDir()
@@ -179,93 +213,6 @@ func TestClientDequeue(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, string(c.expected), string(val))
-			}
-		})
-	}
-}
-
-func TestClientQueueLength(t *testing.T) {
-	cases := []struct {
-		name         string
-		status       int
-		headerVal    string
-		setHeader    bool
-		transportErr error
-		want         int
-		expectErr    bool
-	}{
-		{
-			name:         "OK",
-			status:       http.StatusOK,
-			headerVal:    "5",
-			setHeader:    true,
-			transportErr: nil,
-			want:         5,
-			expectErr:    false,
-		},
-		{
-			name:         "MissingHeader",
-			status:       http.StatusOK,
-			headerVal:    "",
-			setHeader:    false,
-			transportErr: nil,
-			want:         0,
-			expectErr:    true,
-		},
-		{
-			name:         "InvalidHeader",
-			status:       http.StatusOK,
-			headerVal:    "abc",
-			setHeader:    true,
-			transportErr: nil,
-			want:         0,
-			expectErr:    true,
-		},
-		{
-			name:         "Non200",
-			status:       http.StatusInternalServerError,
-			headerVal:    "",
-			setHeader:    false,
-			transportErr: nil,
-			want:         0,
-			expectErr:    true,
-		},
-		{
-			name:         "TransportErr",
-			status:       0,
-			headerVal:    "",
-			setHeader:    false,
-			transportErr: errors.New("dial"),
-			want:         0,
-			expectErr:    true,
-		},
-	}
-	for _, tc := range cases {
-		caze := tc
-		t.Run(caze.name, func(t *testing.T) {
-			var ts *httptest.Server
-			if caze.transportErr == nil {
-				ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					assert.Equal(t, http.MethodHead, r.Method)
-					if caze.setHeader {
-						w.Header().Set("X-Queue-Len", caze.headerVal)
-					}
-					w.WriteHeader(caze.status)
-				}))
-				defer ts.Close()
-			}
-			client := newHTTPTestClient(func() string {
-				if ts != nil {
-					return ts.URL
-				}
-				return "http://invalid"
-			}(), caze.transportErr)
-			got, err := client.QueueLength(context.Background())
-			if caze.expectErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, caze.want, got)
 			}
 		})
 	}
@@ -435,51 +382,4 @@ func TestClientConsume(t *testing.T) {
 			assert.Equal(t, caze.expectContent, string(b))
 		})
 	}
-}
-
-func TestClientQueueLengthIntegration(t *testing.T) {
-	m := queue.NewQueueManager()
-	s := api.NewServer(m)
-	ts := httptest.NewServer(s.Handler())
-	defer ts.Close()
-	client := New(ts.URL, "intq")
-
-	// enqueue a couple messages directly to server
-	for i := 0; i < 3; i++ {
-		if err := client.enqueue(context.Background(), []byte(fmt.Sprintf("m%d", i))); err != nil {
-			t.Fatalf("enqueue: %v", err)
-		}
-	}
-	got, err := client.QueueLength(context.Background())
-	assert.NoError(t, err)
-	assert.Equal(t, 3, got)
-}
-
-type errorRoundTripper struct{ err error }
-
-func (e errorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) { return nil, e.err }
-
-func newHTTPTestClient(url string, rtErr error) *Client {
-	c := New(url, "q")
-	if rtErr != nil {
-		c.HttpClient = &http.Client{Transport: errorRoundTripper{err: rtErr}}
-	}
-	return c
-}
-
-func waitForFileContent(t *testing.T, path string, want []byte, timeout time.Duration, interval time.Duration) {
-	t.Helper()
-	if interval <= 0 {
-		interval = 5 * time.Millisecond
-	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		got, err := os.ReadFile(path)
-		if err == nil && string(got) == string(want) {
-			return
-		}
-		time.Sleep(interval)
-	}
-	got, _ := os.ReadFile(path)
-	assert.Equal(t, string(want), string(got), "content mismatch after timeout")
 }
