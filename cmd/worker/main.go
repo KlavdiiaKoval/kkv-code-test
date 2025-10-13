@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"corti-kkv/internal/rwclient"
 	"errors"
 	"flag"
-	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -13,27 +13,19 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"corti-kkv/internal/rwclient"
 )
 
-// Types
+const dirPerm = 0o755 // rwxr-xr-x
+
 type config struct {
 	queueURL      string
 	queueName     string
 	inPath        string
 	outPath       string
-	mode          string // once|stream for single-file modes
-	watchDir      string // if set enables directory watch mode (multi-file once copy)
-	watchOutDir   string // output directory for watched files (mirrors filenames)
+	mode          string
+	watchDir      string
+	watchOutDir   string
 	watchInterval time.Duration
-}
-
-type fileState struct {
-	size       int64
-	stableCnt  int
-	processing bool
-	processed  bool
 }
 
 func main() {
@@ -47,93 +39,6 @@ func main() {
 	}
 
 	startSingleFileMode(ctx, cfg)
-}
-
-func startWatchMode(ctx context.Context, cfg config) {
-	if err := os.MkdirAll(cfg.watchOutDir, 0o755); err != nil {
-		log.Fatalf("create watch output dir: %v", err)
-	}
-	log.Printf("worker start (watch mode): dir=%s outDir=%s baseQueue=%s interval=%s", cfg.watchDir, cfg.watchOutDir, cfg.queueName, cfg.watchInterval)
-	if err := runWatchMode(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("watch mode error: %v", err)
-		os.Exit(1)
-	}
-}
-
-func startSingleFileMode(ctx context.Context, cfg config) {
-	ensureOutputDir(cfg.outPath)
-	var inSize int64
-	if st, err := os.Stat(cfg.inPath); err == nil {
-		inSize = st.Size()
-	}
-	log.Printf("worker start: queueURL=%s queue=%s mode=%s in=%s(size=%d) out=%s", cfg.queueURL, cfg.queueName, cfg.mode, cfg.inPath, inSize, cfg.outPath)
-	client := rwclient.New(cfg.queueURL, cfg.queueName)
-	prodErr, consErr := runPipeline(ctx, client, cfg)
-	hasErr := false
-	if prodErr != nil && !errors.Is(prodErr, context.Canceled) {
-		hasErr = true
-		log.Printf("producer error: %v", prodErr)
-	}
-	if consErr != nil && !errors.Is(consErr, context.Canceled) {
-		hasErr = true
-		log.Printf("consumer error: %v", consErr)
-	}
-	if hasErr {
-		os.Exit(1)
-	}
-	log.Printf("worker finished successfully")
-}
-
-func runWatchMode(ctx context.Context, cfg config) error {
-	states := make(map[string]*fileState)
-	var mu sync.Mutex
-	wg := &sync.WaitGroup{}
-
-	ticker := time.NewTicker(cfg.watchInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			wg.Wait()
-			return ctx.Err()
-		case <-ticker.C:
-			processWatchDir(ctx, cfg, states, &mu, wg)
-		}
-	}
-}
-
-func runPipeline(ctx context.Context, client *rwclient.Client, cfg config) (prodErr, consErr error) {
-	var wg sync.WaitGroup
-	producerDone := make(chan error, 1)
-	consumerDone := make(chan error, 1)
-
-	// Producer goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if cfg.mode == "stream" {
-			producerDone <- produceStream(ctx, client, cfg.inPath)
-			return
-		}
-		producerDone <- client.Produce(ctx, cfg.inPath)
-	}()
-
-	// Consumer goroutine: if once mode, we wrap client.Consume with cancellation after drain
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if cfg.mode == "once" {
-			consumerDone <- consumeOnce(ctx, client, cfg.outPath, producerDone)
-			return
-		}
-		consumerDone <- client.Consume(ctx, cfg.outPath)
-	}()
-
-	wg.Wait()
-	prodErr = <-producerDone
-	consErr = <-consumerDone
-	return
 }
 
 func parseConfig() config {
@@ -150,12 +55,6 @@ func parseConfig() config {
 	return cfg
 }
 
-func ensureOutputDir(path string) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		log.Fatalf("create output dir: %v", err)
-	}
-}
-
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 	sigCh := make(chan os.Signal, 1)
@@ -168,92 +67,41 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 	return ctx, cancel
 }
 
-func processWatchDir(ctx context.Context, cfg config, states map[string]*fileState, mu *sync.Mutex, wg *sync.WaitGroup) {
-	entries := readWatchDirEntries(cfg.watchDir)
-	for _, entry := range entries {
-		processWatchEntry(ctx, cfg, entry, states, mu, wg)
-	}
-}
-
-func readWatchDirEntries(dir string) []os.DirEntry {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		log.Printf("watch: read dir error: %v", err)
-		return nil
-	}
-	return entries
-}
-
-func processWatchEntry(ctx context.Context, cfg config, entry os.DirEntry, states map[string]*fileState, mu *sync.Mutex, wg *sync.WaitGroup) {
-	if entry.IsDir() {
-		return
-	}
-	name := entry.Name()
-	if strings.HasPrefix(name, ".") {
-		return
-	}
-	full := filepath.Join(cfg.watchDir, name)
-	info, err := entry.Info()
-	if err != nil {
-		return
-	}
-	handleFileState(ctx, cfg, full, info.Size(), states, mu, wg)
-}
-
-func handleFileState(ctx context.Context, cfg config, full string, size int64, states map[string]*fileState, mu *sync.Mutex, wg *sync.WaitGroup) {
-	mu.Lock()
-	defer mu.Unlock()
-	st := states[full]
-	if st == nil {
-		states[full] = &fileState{size: size}
-		return
-	}
-	if st.processed || st.processing {
-		return
-	}
-	updateFileState(st, size)
-	if isFileStable(st) {
-		st.processing = true
-		wg.Add(1)
-		go func(p string) {
-			defer wg.Done()
-			processFile(ctx, cfg, p, states, mu)
-		}(full)
-	}
-}
-
-func updateFileState(st *fileState, size int64) {
-	if size == st.size {
-		st.stableCnt++
-	} else {
-		st.size = size
-		st.stableCnt = 0
-	}
-}
-
-func isFileStable(st *fileState) bool {
-	return st.stableCnt >= 1
-}
-
 func processFile(ctx context.Context, cfg config, path string, states map[string]*fileState, mu *sync.Mutex) {
-	base := filepath.Base(path)
-	qName := cfg.queueName + "-" + sanitize(base)
-	outPath := filepath.Join(cfg.watchOutDir, base)
-	log.Printf("watch: processing file=%s queue=%s out=%s", path, qName, outPath)
+	// 1. Build output/queue names
+	qName, outPath := buildOutputPathAndQueueName(cfg, path)
+
+	// 2. Create a new queue client for this file
 	client := rwclient.New(cfg.queueURL, qName)
+
+	// 3. Start producing (enqueueing) the file contents to the queue
 	producerDone := make(chan error, 1)
 	go func() { producerDone <- client.Produce(ctx, path) }()
-	if err := consumeOnce(ctx, client, outPath, producerDone); err != nil && !errors.Is(err, context.Canceled) {
+	<-producerDone // Wait for producer to finish
+
+	// 4. Start consuming (dequeueing) results from the queue to the output file
+	err := client.Consume(ctx, outPath)
+	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("watch: error processing %s: %v", path, err)
 	} else {
 		log.Printf("watch: completed file=%s", path)
 	}
+
+	// 5. Mark the file as processed in the state map
 	mu.Lock()
 	if st := states[path]; st != nil {
 		st.processed = true
 		st.processing = false
 	}
 	mu.Unlock()
+}
+
+func buildOutputPathAndQueueName(cfg config, path string) (qName, outPath string) {
+	base := filepath.Base(path)
+	qName = cfg.queueName + "-" + sanitize(base)
+	outPath = filepath.Join(cfg.watchOutDir, base)
+	log.Printf("watch: processing file=%s queue=%s out=%s", path, qName, outPath)
+	return
 }
 
 func sanitize(name string) string {
@@ -270,154 +118,4 @@ func sanitize(name string) string {
 		return "file"
 	}
 	return s
-}
-
-func consumeOnce(ctx context.Context, c *rwclient.Client, outPath string, producerDone <-chan error) error {
-	f, err := os.Create(outPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	log.Printf("consumer: writing to %s", outPath)
-
-	idle := 10 * time.Millisecond
-	producerFinished := false
-	for {
-		if err := checkContext(ctx); err != nil {
-			return err
-		}
-		b, err := c.Dequeue(ctx)
-		if err != nil {
-			return err
-		}
-		if len(b) > 0 {
-			if _, err := f.Write(b); err != nil {
-				return err
-			}
-			continue
-		}
-		// empty
-		if !producerFinished {
-			producerFinished = waitForProducer(producerDone)
-		}
-		if producerFinished && queueIsEmpty(ctx, c) {
-			log.Printf("consumer: completed once mode")
-			return nil
-		}
-		time.Sleep(idle)
-	}
-}
-
-// checkContext returns ctx.Err() if context is done, otherwise nil
-func checkContext(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
-	}
-}
-
-// waitForProducer returns true if the producer is finished
-func waitForProducer(producerDone <-chan error) bool {
-	select {
-	case <-producerDone:
-		return true
-	default:
-		return false
-	}
-}
-
-// queueIsEmpty returns true if the queue is empty, false otherwise
-func queueIsEmpty(ctx context.Context, c *rwclient.Client) bool {
-	ln, err := c.QueueLength(ctx)
-	return err == nil && ln == 0
-}
-
-func produceStream(ctx context.Context, c *rwclient.Client, path string) error {
-	const pollInterval = 300 * time.Millisecond
-	var offset int64
-	var partial []byte
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		f, err := os.Open(path) // open each loop to catch rotations/truncations
-		if os.IsNotExist(err) {
-			// File missing: brief sleep then retry
-			time.Sleep(pollInterval)
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		// Get current size and adjust offset if truncated
-		st, err := f.Stat()
-		if err != nil {
-			f.Close()
-			return err
-		}
-		if st.Size() < offset {
-			// truncated
-			offset = 0
-			partial = nil
-		}
-		if _, err = f.Seek(offset, io.SeekStart); err != nil {
-			f.Close()
-			return err
-		}
-
-		buf := make([]byte, 32*1024)
-		readSomething := false
-		for {
-			select {
-			case <-ctx.Done():
-				f.Close()
-				return ctx.Err()
-			default:
-			}
-			n, err := f.Read(buf)
-			if n > 0 {
-				readSomething = true
-				offset += int64(n)
-				chunk := buf[:n]
-				// prepend partial
-				if len(partial) > 0 {
-					chunk = append(partial, chunk...)
-					partial = nil
-				}
-				// split on newlines
-				start := 0
-				for i, b := range chunk {
-					if b == '\n' {
-						line := chunk[start : i+1]
-						if e := c.Enqueue(ctx, line); e != nil {
-							f.Close()
-							return e
-						}
-						start = i + 1
-					}
-				}
-				if start < len(chunk) { // remaining partial fragment
-					partial = append(partial, chunk[start:]...)
-				}
-			}
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				f.Close()
-				return err
-			}
-		}
-		f.Close()
-		if !readSomething {
-			// nothing new; sleep then poll again
-			time.Sleep(pollInterval)
-		}
-	}
 }
