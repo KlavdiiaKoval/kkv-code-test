@@ -1,3 +1,4 @@
+
 # Assignment: Queue between a file reader and writer
 
 It’s your job to design a simple messaging system by using a queue service:
@@ -9,7 +10,6 @@ It’s your job to design a simple messaging system by using a queue service:
 
 Implement it as 2 asynchronous workers exchanging information by using a service.
 
-
 ## Task requirements
 
 - Documentation on how to run your solution
@@ -17,6 +17,7 @@ Implement it as 2 asynchronous workers exchanging information by using a service
 - An arbitrary ASCII text file fed into the solution should produce an identical copy
 
 ### Bonus Tasks
+
 - Use only one process for the reader/writer and one for the queue service
 - Your solution has full unit test coverage
 - You have a service/container-based deployment strategy
@@ -25,16 +26,17 @@ Implement it as 2 asynchronous workers exchanging information by using a service
 
 ---
 
-# Solution Overview
+## Solution Overview
 
 File-to-file messaging pipeline using Go's standard library. Reads lines from a file (or directory), sends them through an HTTP queue service, and writes them to output files, verifying content reproduction. Only two processes are used: one for the queue service and one for the worker (reader/writer).
 
-## Components
-
 - **queue-service**: In-memory FIFO queue with HTTP API. Endpoints:
-	- `POST /queues/:name/messages` (enqueue, accepts `application/octet-stream` or JSON `{ "message": "..." }`)
-	- `DELETE /queues/:name/messages/head` (dequeue, returns message as `application/octet-stream`)
+  - `POST /queues/:name/messages` (enqueue, accepts `application/octet-stream` or JSON `{ "message": "..." }`)
+  - `DELETE /queues/:name/messages/head` (dequeue, returns message as `application/octet-stream`)
+
 - **worker**: Single process that acts as both reader (producer) and writer (consumer). Supports single-file and directory watch. Communicates with the queue-service using the above endpoints.
+
+
 
 ---
 
@@ -49,13 +51,12 @@ flowchart LR
     W2 -- HTTP DELETE /queues/:name/messages/head --> Q
     Q -- message --> W2
     W2 -- write lines --> B[output.txt /data/out/*.txt]
-
     subgraph Worker Process
-        W1
-        W2
+      W1
+      W2
     end
     subgraph Queue Service
-        Q
+      Q
     end
 ```
 
@@ -63,71 +64,80 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
-	participant User
-	participant Worker as Worker (producer/consumer)
-	participant Queue as Queue Service
-	participant Output as Output File
+  participant User
+  participant Worker as Worker (producer/consumer)
+  participant Queue as Queue Service
+  participant Output as Output File
 
-	User->>Worker: Drop file in data/in/
-	Worker->>Queue: POST /queues/:name/messages (enqueue lines)
-	Queue-->>Worker: 202 Accepted (or 400 Bad Request)
-	Worker->>Queue: DELETE /queues/:name/messages/head (dequeue lines)
-	Queue-->>Worker: 200 OK (message) or 204 No Content
-	Worker->>Output: Write lines to data/out/
+  User->>Worker: Drop file in data/in/
+  Worker->>Queue: POST /queues/:name/messages (enqueue lines)
+  Queue-->>Worker: 202 Accepted (or 400 Bad Request)
+  Worker->>Queue: DELETE /queues/:name/messages/head (dequeue lines)
+  Queue-->>Worker: 200 OK (message) or 204 No Content
+  Worker->>Output: Write lines to data/out/
 ```
 
 ### Deployment Diagram
 
 ```mermaid
 flowchart TD
-	subgraph Docker Host
-		subgraph Container: queue-service
-			Q[queue-service]
-		end
-		subgraph Container: worker
-			W[worker]
-		end
-		V[(data volume: ./data)]
-		W -- mount /data --> V
-		Q -- mount /data --> V
-	end
-	User -.-> V
+  subgraph Docker Host
+    subgraph Container: queue-service
+      Q[queue-service]
+    end
+    subgraph Container: worker
+      W[worker]
+    end
+    V[(data volume: ./data)]
+    W -- mount /data --> V
+    Q -- mount /data --> V
+  end
+  User -.-> V
 ```
 
-### 1. Build and start all services:
+### 1. Build and start all services
+
 ```bash
 docker-compose up --build
 ```
 
 This will start both the queue service and the worker, mounting the local `./data` directory into the containers.
 
-### 2. Using the pipeline:
+### 2. Using the pipeline
+
 - Create input/output directories if they don't exist:
-	```bash
-	mkdir -p data/in data/out
-	```
+
+  ```bash
+  mkdir -p data/in data/out
+  ```
+
 - Drop a file into `data/in/` (for example):
-	```bash
-	echo "hello world" > data/in/example.txt
 
-	# Or create a more complex file with line breaks:
-    
-    ```  
-cat > data/in/complex.txt <<EOF      
-first line        
-second line        
-third line        
+  ```bash
+  echo "hello world" > data/in/example.txt
+  ```
 
-last line        
-EOF 
-```
+- Or create a more complex file with line breaks:
+
+  ```bash
+  cat > data/in/complex.txt <<EOF
+  first line
+  second line
+  third line
+
+  last line
+  EOF
+  ```
+
 - The worker will process them and write outputs to `data/out/` (mirroring filenames):
-	```bash
-	cat data/out/example.txt
-	# Output: hello world
-	```
 
-### 3. Stopping services:
+  ```bash
+  cat data/out/example.txt
+  # Output: hello world
+  ```
+
+### 3. Stopping services
+
 ```bash
 docker-compose down
 ```
@@ -136,23 +146,25 @@ docker-compose down
 
 ## Quick Start (Local, without Docker)
 
+### 1. Start the queue service (terminal 1)
 
-### 1. Start the queue service (terminal 1):
 ```bash
 go run ./cmd/queue-service
 ```
 
-### 2. Start the worker (terminal 2):
+### 2. Start the worker (terminal 2)
 
+#### Directory watch (default)
 
-#### Directory watch (default):
 ```bash
 mkdir -p data/in data/out
 go run ./cmd/worker -watch-dir data/in -watch-out data/out -queue lines
 ```
+
 Drop files into `data/in/` and outputs will appear in `data/out/` with the same filenames.
 
-#### Single-file mode (default if -watch-dir not set):
+#### Single-file mode (default if -watch-dir not set)
+
 ```bash
 go run ./cmd/worker -in data/input.txt -out data/output.txt -queue lines
 ```
@@ -161,7 +173,9 @@ go run ./cmd/worker -in data/input.txt -out data/output.txt -queue lines
 - The default queue URL is `http://localhost:8080` (use `-queue-url` if you change it).
 - The `-queue` flag must match between producer and consumer.
 
+
 #### Example: Creating a complex input file
+
 ```bash
 cat > data/in/complex.txt <<EOF
 first line
@@ -172,34 +186,42 @@ last line
 EOF
 ```
 
-
 ## Testing
 
+
 Run all tests:
+
 ```bash
 go test ./...
 ```
+
 With race detector:
+
 ```bash
 go test -race ./...
 ```
+
 Coverage:
+
 ```bash
 go test -cover ./...
 ```
+
 HTML report:
+
 ```bash
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out -o coverage.html
 ```
 
-
 ## Configuration
 
-### queue-service flags:
+### queue-service flags
+
 - `-addr` - Server address (default: `:8080`)
 
-### worker flags:
+### worker flags
+
 - `-queue-url` - Queue service URL (default: `http://localhost:8080`)
 - `-queue` - Queue name (default: `lines`)
 - `-in` - Input file path (default: `data/input.txt`)
@@ -208,8 +230,6 @@ go tool cover -html=coverage.out -o coverage.html
 - `-watch-out` - Output directory for processed files (default: `data/out`)
 - `-watch-interval` - Poll interval (default: 500ms)
 
-
-
 ## Design
 
 - Only two processes: one for the queue service, one for the worker (reader/writer)
@@ -217,26 +237,26 @@ go tool cover -html=coverage.out -o coverage.html
 - Output file is a byte-for-byte copy of input
 - In-memory FIFO queue with mutex protection
 - HTTP API:
-	- `POST /queues/:name/messages` (enqueue, accepts `application/octet-stream` or JSON `{ "message": "..." }`)
-	- `DELETE /queues/:name/messages/head` (dequeue, returns message as `application/octet-stream`, 204 if empty)
+
+  - `POST /queues/:name/messages` (enqueue, accepts `application/octet-stream` or JSON `{ "message": "..." }`)
+  - `DELETE /queues/:name/messages/head` (dequeue, returns message as `application/octet-stream`, 204 if empty)
+
 ## API Reference
 
 ### Enqueue (POST /queues/:name/messages)
 
 - **Content-Type:** `application/octet-stream` (raw bytes) or `application/json` (`{"message": "..."}`)
 - **Response:**
-	- `202 Accepted` on success
-	- `400 Bad Request` for missing/invalid input
+  - `202 Accepted` on success
+  - `400 Bad Request` for missing/invalid input
 
 ### Dequeue (DELETE /queues/:name/messages/head)
 
 - **Response:**
-	- `200 OK` with message as `application/octet-stream` if a message is available
-	- `204 No Content` if the queue is empty
-	- `400 Bad Request` for missing/invalid queue name
+  - `200 OK` with message as `application/octet-stream` if a message is available
+  - `204 No Content` if the queue is empty
+  - `400 Bad Request` for missing/invalid queue name
 - Worker uses goroutines for producer/consumer logic
-
-
 
 ## Limitations
 
@@ -245,9 +265,7 @@ go tool cover -html=coverage.out -o coverage.html
 - Watch mode uses polling (not FS events)
 - No back-pressure or max queue size enforcement
 
-
 ## Scaling Strategy
-
 
 This solution was built for simplicity and local testing, but it can be scaled to handle higher throughput and improved reliability with a few key enhancements.
 
@@ -267,7 +285,7 @@ This solution was built for simplicity and local testing, but it can be scaled t
 
 ### Deployment and Operations
 
-- **Container Orchestration:** e.g Kubernetes 
+- **Container Orchestration:** e.g Kubernetes
 - **Monitoring and Alerting:** It's essential to track system health. Tools like Prometheus and Grafana can monitor queue depth, worker status, and processing times. Set up alerts so issues like failures or growing backlogs don’t go unnoticed.
 
 - **Back-pressure:** To avoid memory issues or system crashes under heavy load, implement back-pressure mechanisms or enforce queue size limits to keep things running smoothly.
